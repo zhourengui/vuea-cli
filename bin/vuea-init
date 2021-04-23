@@ -1,0 +1,156 @@
+#!/usr/bin/env node
+
+const chalk = require("chalk")
+const program = require("commander")
+const path = require("path")
+const home = require("user-home")
+const tildify = require("tildify")
+const exists = require("fs").existsSync
+const inquirer = require("inquirer")
+const localPath = require("../lib/local-path")
+const checkVersion = require("../lib/check-version")
+const download = require("download-git-repo")
+const ora = require("ora")
+const warnings = require("../lib/warnings")
+const rm = require("rimraf").sync
+const generate = require("../lib/generate")
+const logger = require("../lib/logger")
+
+const isLocalPath = localPath.isLocalPath
+const getTemplatePath = localPath.getTemplatePath
+
+/**
+ * vuea-init 使用配置和帮助
+ */
+
+program
+  .usage("<template-name> [project-name]")
+  .option("-c, --clone", "use git clone")
+  .option("--offline", "use cached template")
+
+program.on("--help", () => {
+  console.log("  Examples:")
+  console.log()
+  console.log(
+    chalk.gray("    # create a new project with an official template")
+  )
+  console.log("    $ vuea init webpack my-project")
+  console.log()
+  console.log(
+    chalk.gray("    # create a new project straight from a github template")
+  )
+  console.log("    $ vuea init username/repo my-project")
+  console.log()
+})
+
+/**
+ * 如果没有传参数执行help方法
+ */
+function help() {
+  program.parse(process.argv)
+  if (program.args.length < 1) return program.help()
+}
+help()
+
+/**
+ * 获取配置
+ */
+const template = program.args[0] // 获取模板名称
+const hasSlash = template.indexOf("/") > -1 // 判断是否是本地模板
+console.log(
+  chalk.green(`模板名称：${template}，${hasSlash ? "本地模板" : "官方模板"}`)
+)
+const rawName = program.args[1] // 获取项目名称
+const inPlace = !rawName || rawName === "." // 用户如果没有输入项目名称，或者输入.
+const name = inPlace ? path.relative("../", process.cwd()) : rawName // 通过判断生成最终生成的项目名称
+const to = path.resolve(rawName || ".") // 生成项目路径
+console.log(chalk.green(`项目生成的路径：${to}`))
+
+const clone = program.clone || false // 是否使用git clone，不是的话使用download
+const tmp = path.join(home, ".vue-templates", template.replace(/[\/:]/g, "-"))
+if (program.offline) {
+  // 从缓存中获取模板
+  console.log(`> Use cached template at ${chalk.yellow(tildify(tmp))}`)
+  template = tmp
+}
+
+// 如果用户没有输入名称，询问用户是否确定使用默认的模板名称
+if (inPlace || exists(to)) {
+  inquirer
+    .prompt([
+      {
+        type: "confirm",
+        message: inPlace
+          ? "Generate project in current directory?"
+          : "Target directory exists. Continue?",
+        name: "ok",
+      },
+    ])
+    .then((answers) => {
+      if (answers.ok) {
+        run()
+      }
+    })
+    .catch((err) => console.log(chalk.red(err)))
+} else {
+  run()
+}
+
+/**
+ * 下载模板项目
+ */
+
+function run() {
+  if (isLocalPath(template)) {
+    const templatePath = getTemplatePath(template)
+    if (exists(templatePath)) {
+      generate(name, templatePath, to, (err) => {
+        if (err) logger.fatal(err)
+        console.log()
+        logger.success('Generated "%s".', name)
+      })
+      console.error("生成模板逻辑")
+    } else {
+      console.log(chalk.yellow(`Local template "%s" not found. ${template}`))
+    }
+  } else {
+    // 检查node版本
+    checkVersion(() => {
+      if (!hasSlash) {
+        // 使用远程仓库模板
+        const officialTemplate = "vuejs-templates/" + template
+        if (template.indexOf("#") !== -1) {
+          downloadAndGenerate(officialTemplate)
+        } else {
+          if (template.indexOf("-2.0") !== -1) {
+            warnings.v2SuffixTemplatesDeprecated(template, inPlace ? "" : name)
+            return
+          }
+          downloadAndGenerate(officialTemplate)
+        }
+      } else {
+        downloadAndGenerate(template)
+      }
+    })
+  }
+}
+
+function downloadAndGenerate(template) {
+  const spinner = ora("downloading template")
+  spinner.start()
+  if (exists(tmp)) rm(tmp)
+  download(template, tmp, { clone: false }, (err) => {
+    spinner.stop()
+    if (err)
+      console.log(
+        chalk.red(
+          "Failed to download repo " + template + ": " + err.message.trim()
+        )
+      )
+    generate(name, tmp, to, (err) => {
+      if (err) logger.fatal(err)
+      console.log()
+      logger.success('Generated "%s".', name)
+    })
+  })
+}
